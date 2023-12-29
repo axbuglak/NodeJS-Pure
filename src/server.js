@@ -79,6 +79,12 @@ class Client extends EventEmitter {
     return true;
   }
 
+  startSession(token, data = {}) {
+    this.initializeSession(token, data);
+    if (!this.#transport.connection) this.#transport.writeSessionCookie(token);
+    return true;
+  }
+
   destroy() {
     this.emit('close');
     if (!this.session) return;
@@ -123,6 +129,8 @@ class Server {
       }
       const transport = new HttpTransport(this, req, res);
       const client = new Client(transport);
+      const cookies = transport.readCookies();
+      if (cookies.token) client.restoreSession(sessions);
       const data = await receiveBody(req);
       this.rpc(client, data);
 
@@ -161,22 +169,18 @@ class Server {
       client.error(400, { id, error, pass: true });
       return;
     }
-    /* TODO: resumeCookieSession(); */
     const [unit, method] = packet.method.split('/');
     const proc = this.routing.get(unit + '.' + method);
     if (!proc) {
-      client.error(404, { id });
-      return;
+      return void client.error(404, { id });
     }
     const context = client.createContext();
-    /* TODO: check rights
-    if (!client.session && proc.access !== 'public') {
-      client.error(403, { id });
-      return;
-    }*/
+    if (!client.session && proc().access !== 'public') {
+      return void client.error(403, { id });
+    }
     this.console.log(`${client.ip}\t${packet.method}`);
     proc(context)
-      .method(packet.args)
+      .method(...packet.args)
       .then((result) => {
         if (result?.constructor?.name === 'Error') {
           const { code, httpCode = 200 } = result;

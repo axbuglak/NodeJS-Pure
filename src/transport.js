@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('node:http');
+const metautil = require('metautil');
 
 const MIME_TYPES = {
   html: 'text/html; charset=UTF-8',
@@ -20,6 +21,13 @@ const HEADERS = {
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
 };
+
+const TOKEN = 'token';
+const EPOCH = 'Thu, 01 Jan 1970 00:00:00 GMT';
+const FUTURE = 'Fri, 01 Jan 2100 00:00:00 GMT';
+const LOCATION = 'Path=/; Domain';
+const COOKIE_DELETE = `${TOKEN}=deleted; Expires=${EPOCH}; ${LOCATION}=`;
+const COOKIE_HOST = `Expires=${FUTURE}; ${LOCATION}`;
 
 class Transport {
   constructor(server, req) {
@@ -44,6 +52,24 @@ class Transport {
   send(obj, code = 200) {
     const data = JSON.stringify(obj);
     this.write(data, code, 'json');
+  }
+
+  async readCookies() {
+    const { cookie } = this.req.headers;
+    if (!cookie) return {};
+    return metautil.parseCookies(cookie);
+  }
+
+  writeSessionCookie(token) {
+    const host = metautil.parseHost(this.req.headers.host);
+    const cookie = `${TOKEN}=${token}; ${COOKIE_HOST}=${host}`;
+    console.log({ cookie });
+    this.res.setHeader('Set-Cookie', cookie);
+  }
+
+  removeSessionCookie() {
+    const host = metautil.parseHost(this.req.headers.host);
+    this.res.setHeader('Set-Cookie', COOKIE_DELETE + host);
   }
 }
 
