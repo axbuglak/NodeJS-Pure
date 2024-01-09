@@ -16,6 +16,7 @@ const MIME_TYPES = {
 const HEADERS = {
   'X-XSS-Protection': '1; mode=block',
   'X-Content-Type-Options': 'nosniff',
+  'X-HTTP-Method-Override': 'GET',
   'Strict-Transport-Security': 'max-age=31536000; includeSubdomains; preload',
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
@@ -63,7 +64,6 @@ class Transport {
   writeSessionCookie(token) {
     const host = metautil.parseHost(this.req.headers.host);
     const cookie = `${TOKEN}=${token}; ${COOKIE_HOST}=${host}`;
-    console.log({ cookie });
     this.res.setHeader('Set-Cookie', cookie);
   }
 
@@ -82,7 +82,12 @@ class HttpTransport extends Transport {
   write(data, httpCode = 200, ext = 'json') {
     if (this.res.writableEnded) return;
     const mimeType = MIME_TYPES[ext] || MIME_TYPES.html;
-    this.res.writeHead(httpCode, { ...HEADERS, 'Content-Type': mimeType });
+    const headers =  {
+      ...HEADERS,
+      'Cache-Control': 'private, max-age=3600, must-revalidate',
+      'Content-Type': mimeType
+    };
+    this.res.writeHead(httpCode, headers);
     this.res.end(data);
   }
 }

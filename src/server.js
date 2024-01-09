@@ -11,10 +11,11 @@ const transport = require('./transport.js');
 const { HttpTransport, WsTransport, MIME_TYPES, HEADERS } = transport;
 
 class Session {
-  constructor(token, data) {
+  constructor(token, data, stateless) {
     this.token = token;
-    this.state = { ...data };
+    if (!stateless) this.state = { ...data };
   }
+
 }
 
 const sessions = new Map(); // token: Session
@@ -30,6 +31,7 @@ class Context {
 
 class Client extends EventEmitter {
   #transport;
+  stateless = false;
 
   constructor(transport) {
     super();
@@ -60,8 +62,9 @@ class Client extends EventEmitter {
 
   initializeSession(token, data = {}) {
     this.finalizeSession();
-    this.session = new Session(token, data);
+    this.session = new Session(token, data, this.stateless);
     sessions.set(token, this.session);
+    console.log(sessions);
     return true;
   }
 
@@ -123,17 +126,17 @@ class Server {
 
   listen(port) {
     this.httpServer.on('request', async (req, res) => {
-      if (!req.url.startsWith('/api')) {
-        this.staticHandler(req, res);
-        return;
-      }
+      if (!req.url.startsWith('/api')) return void this.staticHandler(req, res);
+      const data = await receiveBody(req).then((data) => jsonParse(data));
       const transport = new HttpTransport(this, req, res);
-      const client = new Client(transport);
       const cookies = transport.readCookies();
-      if (cookies.token) client.restoreSession(sessions);
-      const data = await receiveBody(req);
-      this.rpc(client, data);
-
+      const { token } = await cookies;
+      const client = new Client(transport);
+      if (token) client.restoreSession(token);
+      const path = req.url.substring(5);
+      if (path.length === 0) return void this.rpc(client, data);
+      const packet = { method: path, args: data, type: req.method, id: path };
+      this.rest(client, packet);
       req.on('close', () => {
         client.destroy();
       });
@@ -145,7 +148,8 @@ class Server {
       const client = new Client(transport);
 
       connection.on('message', (data) => {
-        this.rpc(client, data);
+        const packet = jsonParse(data);
+        this.rest(client, packet);
       });
 
       connection.on('close', () => {
@@ -156,8 +160,12 @@ class Server {
     this.httpServer.listen(port);
   }
 
-  rpc(client, data) {
-    const packet = jsonParse(data);
+  rest(client, packet) {
+    client.stateless = true;
+    this.message(packet, client);
+  }
+
+  rpc(client, packet) {
     if (!packet) {
       const error = new Error('JSON parsing error');
       client.error(500, { error, pass: true });
@@ -169,18 +177,22 @@ class Server {
       client.error(400, { id, error, pass: true });
       return;
     }
+    this.message(packet, client);
+  }
+
+  message(packet, client) {
+    const { id } = packet;
     const [unit, method] = packet.method.split('/');
     const proc = this.routing.get(unit + '.' + method);
-    if (!proc) {
-      return void client.error(404, { id });
-    }
+    if (!proc) return void client.error(404, { id });
     const context = client.createContext();
-    if (!client.session && proc().access !== 'public') {
+    const typingCheck = packet.type !== 'call' && packet.type === proc().type;
+    if (!client.session && proc().access !== 'public' && typingCheck) {
       return void client.error(403, { id });
     }
     this.console.log(`${client.ip}\t${packet.method}`);
     proc(context)
-      .method(...packet.args)
+      .method(packet.args)
       .then((result) => {
         if (result?.constructor?.name === 'Error') {
           const { code, httpCode = 200 } = result;
