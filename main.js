@@ -2,10 +2,8 @@
 
 const vm = require('node:vm');
 const fsp = require('node:fs').promises;
+const fs = require('node:fs');
 const path = require('node:path');
-
-const metarhia  = {};
-metarhia.metautil = require('metautil');
 
 const console = require('./lib/logger.js');
 const common = require('./lib/common.js');
@@ -14,6 +12,7 @@ const { loadDir, createRouting } = require('./src/loader.js');
 const { Server } = require('./src/server.js');
 
 const sandbox = vm.createContext({ console, common });
+const node = {};
 
 (async () => {
   const applications = await fsp.readFile('.applications', 'utf8');
@@ -27,9 +26,10 @@ const sandbox = vm.createContext({ console, common });
 
   const domainPath = path.join(appPath, './domain');
   const domain = await loadDir(domainPath, sandbox);
+  node.fs = fs;
 
   sandbox.db = require('./lib/db.js')(config.database);
-  sandbox.metarhia = metarhia;
+  sandbox.node = node;
 
   const apiPath = path.join(appPath, './api');
   const api = await loadDir(apiPath, sandbox, true);
