@@ -2,12 +2,14 @@
 
 const http = require('node:http');
 const fs = require('node:fs');
+const fsp = require('node:fs').promises;
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { EventEmitter } = require('node:events');
 const ws = require('ws');
 const { receiveBody, jsonParse } = require('../lib/common.js');
 const transport = require('./transport.js');
+const stream = require('node:stream');
 const { HttpTransport, WsTransport, MIME_TYPES, HEADERS } = transport;
 
 class Session {
@@ -30,12 +32,13 @@ class Context {
 
 class Client extends EventEmitter {
   #transport;
-
+  #streamsCount = 0;
   constructor(transport) {
     super();
     this.#transport = transport;
     this.ip = transport.ip;
     this.session = null;
+    this.streams = new Map();
   }
 
   error(code, options) {
@@ -48,6 +51,50 @@ class Client extends EventEmitter {
 
   createContext() {
     return new Context(this);
+  }
+
+  getStream(id) {
+    const stream = this.streams.get(id);
+    if (!stream) return false;
+    return stream;
+  }
+
+  createStream(size = null) {
+    let currentSize = 0;
+    const streamId = ++this.#streamsCount;
+    const send = (obj) => this.send({ type: 'stream', streamId, ...obj });
+    const close = () => {
+      this.closeStream(streamId);
+      send({ result: `Stream ${streamId} closed` });
+    };
+    const duplex = new stream.Duplex({
+      read() {},
+      write(chunk, encoding, callback) {
+        if (chunk) send({ chunk });
+        callback();
+      },
+    });
+    duplex.on('unpipe', () => {
+      close();
+    });
+    duplex.on('data', (chunk) => {
+      send({ result: 'Chunk arrived' });
+      if ((currentSize += chunk.length) >= size) {
+        close();
+      }
+    });
+    this.streams.set(streamId, duplex);
+    send({ result: 'Stream initialized' });
+    return duplex;
+  }
+
+  closeStream(streamId) {
+    const stream = this.getStream(streamId);
+    if (!stream) return false;
+    stream.destroy();
+    this.streams.delete(streamId);
+    this.#streamsCount--;
+    return true;
   }
 
   emit(name, data) {
@@ -83,6 +130,7 @@ class Client extends EventEmitter {
     this.emit('close');
     if (!this.session) return;
     this.finalizeSession();
+    this.streams.clear();
   }
 }
 
@@ -124,7 +172,8 @@ class Server {
       const transport = new HttpTransport(this, req, res);
       const client = new Client(transport);
       const data = await receiveBody(req);
-      this.rpc(client, data);
+      const packet = jsonParse(data);
+      this.rpc(client, packet);
 
       req.on('close', () => {
         client.destroy();
@@ -137,7 +186,10 @@ class Server {
       const client = new Client(transport);
 
       connection.on('message', (data) => {
-        this.rpc(client, data);
+        const packet = jsonParse(data);
+        const { type } = packet;
+        if (type === 'call') this.rpc(client, packet);
+        if (type === 'stream') this.stream(client, packet);
       });
 
       connection.on('close', () => {
@@ -148,8 +200,38 @@ class Server {
     this.httpServer.listen(port);
   }
 
-  rpc(client, data) {
-    const packet = jsonParse(data);
+  stream(client, packet) {
+    const { id, args } = packet;
+    const { streamId, name, chunk } = args;
+    if (!id || !packet.method || !name) {
+      const error = new Error('Invalid packet');
+      return void client.error(400, { id, error, pass: true });
+    }
+    if (!streamId) {
+      const [unit, method] = packet.method.split('/');
+      const proc = this.routing.get(unit + '.' + method);
+      if (!proc) client.error(400, { id });
+      const context = client.createContext();
+      proc(context)
+        .method(args)
+        .then((result) => {
+          if (result?.constructor?.name === 'Error') {
+            const { code, httpCode = 200 } = result;
+            client.error(code, { id, error: result, httpCode });
+            return;
+          }
+        })
+        .catch((error) => {
+          client.error(error.code, { id, error });
+        });
+      return;
+    }
+    const stream = client.getStream(streamId);
+    const ret = new Uint8Array(chunk);
+    stream.push(ret);
+  }
+
+  rpc(client, packet) {
     if (!packet) {
       const error = new Error('JSON parsing error');
       client.error(500, { error, pass: true });
@@ -169,11 +251,11 @@ class Server {
       return;
     }
     const context = client.createContext();
-    /* TODO: check rights
-    if (!client.session && proc.access !== 'public') {
-      client.error(403, { id });
-      return;
-    }*/
+    //  TODO: check rights
+    // if (!client.session && proc.access !== 'public') {
+    //   client.error(403, { id });
+    //   return;
+    // }
     this.console.log(`${client.ip}\t${packet.method}`);
     proc(context)
       .method(...packet.args)

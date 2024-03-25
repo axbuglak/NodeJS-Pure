@@ -13,7 +13,11 @@ const load = async (filePath, sandbox, contextualize = false) => {
   const src = await fsp.readFile(filePath, 'utf8');
   const opening = contextualize ? '(context) => ' : '';
   const code = `'use strict';\n${opening}${src}`;
-  const script = new vm.Script(code, { ...OPTIONS, lineOffset: -1 });
+  const script = new vm.Script(code, {
+    ...OPTIONS,
+    filename: filePath,
+    lineOffset: -1,
+  });
   return script.runInContext(sandbox, OPTIONS);
 };
 
